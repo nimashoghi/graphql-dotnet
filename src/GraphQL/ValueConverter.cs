@@ -1,11 +1,18 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace GraphQL
 {
     public static class ValueConverter
     {
+        private static readonly Dictionary<Type, Func<object, Type[], object>> WrapConversions
+            = new Dictionary<Type, Func<object, Type[], object>>();
+        private static readonly Dictionary<Type, Func<object, Type[], object>> UnwrapConversions
+            = new Dictionary<Type, Func<object, Type[], object>>();
+        private static readonly Dictionary<Type, Dictionary<Type, Func<object, Type[], object>>> TypeDefinitionConversions
+            = new Dictionary<Type, Dictionary<Type, Func<object, Type[], object>>>();
         private static readonly Dictionary<Type, Dictionary<Type, Func<object, object>>> ValueConversions
             = new Dictionary<Type, Dictionary<Type, Func<object, object>>>();
 
@@ -54,6 +61,8 @@ namespace GraphQL
             Register(typeof(double), typeof(decimal), DoubleToDecimal);
 
             Register(typeof(string), typeof(Uri), ParseUri);
+
+            RegisterUnwrap(typeof(Nullable<>), (dynamic value, Type[] _) => value.HasValue ? value.Value : null);
         }
 
         private static object IntToDouble(object value)
@@ -206,11 +215,11 @@ namespace GraphQL
         private static object ParseUri(object value) =>
             value is string s
                 ? new Uri(s)
-                : (Uri) value;
+                : (Uri)value;
 
         private static object ParseShort(object value) => convertToInt16((string)value);
-        private static object IntToShort(object value) => convertToInt16((int) value);
-        private static object LongToShort(object value) => convertToInt16((long) value);
+        private static object IntToShort(object value) => convertToInt16((int)value);
+        private static object LongToShort(object value) => convertToInt16((long)value);
 
         private static object convertToInt16<T>(T value) =>
             Convert.ToInt16(value, NumberFormatInfo.InvariantInfo);
@@ -266,6 +275,30 @@ namespace GraphQL
                 if (conversions.TryGetValue(targetType, out var conversion))
                     return conversion;
 
+
+            if (valueType.IsGenericType && targetType.IsGenericType && Enumerable.SequenceEqual(valueType.GenericTypeArguments, targetType.GenericTypeArguments))
+            {
+                var valueTypeDef = valueType.GetGenericTypeDefinition();
+                var targetTypeDef = targetType.GetGenericTypeDefinition();
+                if (TypeDefinitionConversions.TryGetValue(valueTypeDef, out var typeDefConversions))
+                    if (typeDefConversions.TryGetValue(targetTypeDef, out var typeDefConversion))
+                        return arg => typeDefConversion.Invoke(arg, valueType.GenericTypeArguments);
+            }
+
+            if (valueType.IsGenericType)
+            {
+                var valueTypeDef = valueType.GetGenericTypeDefinition();
+                if (UnwrapConversions.TryGetValue(valueTypeDef, out var unwrapConversion))
+                    return arg => unwrapConversion.Invoke(arg, valueType.GenericTypeArguments);
+            }
+
+            if (targetType.IsGenericType)
+            {
+                var targetTypeDef = targetType.GetGenericTypeDefinition();
+                if (UnwrapConversions.TryGetValue(targetTypeDef, out var wrapConversion))
+                    return arg => wrapConversion.Invoke(arg, targetType.GenericTypeArguments);
+            }
+
             throw new InvalidOperationException(
                 $"Could not find conversion from {valueType.FullName} to {targetType.FullName}");
         }
@@ -277,6 +310,42 @@ namespace GraphQL
 
             var conversions = ValueConversions[valueType];
             conversions[targetType] = conversion;
+        }
+
+        public static void RegisterTypeDefinition(Type valueTypeDef, Type targetTypeDef, Func<object, Type[], object> conversion)
+        {
+            if (!valueTypeDef.IsGenericTypeDefinition || !targetTypeDef.IsGenericTypeDefinition)
+            {
+                throw new ArgumentException("valueTypeDef and targetTypeDef must be generic type definitions");
+            }
+
+            if (!TypeDefinitionConversions.ContainsKey(valueTypeDef))
+                TypeDefinitionConversions.Add(valueTypeDef, new Dictionary<Type, Func<object, Type[], object>>());
+
+            var conversions = TypeDefinitionConversions[valueTypeDef];
+            conversions[targetTypeDef] = conversion;
+        }
+
+        public static void RegisterUnwrap(Type valueTypeDef, Func<object, Type[], object> conversion)
+        {
+            if (!valueTypeDef.IsGenericTypeDefinition)
+            {
+                throw new ArgumentException("valueTypeDef must be generic type definitions");
+            }
+
+            if (!UnwrapConversions.ContainsKey(valueTypeDef))
+                UnwrapConversions.Add(valueTypeDef, conversion);
+        }
+
+        public static void RegisterWrap(Type wrappedTypeDef, Func<object, Type[], object> conversion)
+        {
+            if (!wrappedTypeDef.IsGenericTypeDefinition)
+            {
+                throw new ArgumentException("wrappedTypeDef must be generic type definitions");
+            }
+
+            if (!UnwrapConversions.ContainsKey(wrappedTypeDef))
+                UnwrapConversions.Add(wrappedTypeDef, conversion);
         }
     }
 }
